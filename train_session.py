@@ -4,6 +4,9 @@ import time
 import shutil
 
 if __name__ == '__main__':
+
+    # Stacked Dense Denoise-Segmentation Network for low-projection CT Volumes
+
     parser = Options()
     (configuration, args) = parser.parse_args()
     #display = configuration.root + configuration.name + '/display.txt'
