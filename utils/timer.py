@@ -6,7 +6,7 @@ class Timer(object):
     def __init__(self):
         self.last_time = time.time()
 
-    def get_value(self, *args):
+    def get_value(self):
         if self.last_time:
             now = time.time()
             duration = now - self.last_time

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torch import optim
 #from torch.autograd import Variable
-from utils.accuracy import meas_cm, meas_cm_weighted, SSIM
+from utils.accuracy import meas_cm, meas_cm_weighted, meas_cm_weighted_hmm, SSIM
 from utils.presenter import PrintProgress
 from utils.colors import Colors
 from torch.utils.data import DataLoader
@@ -26,7 +26,10 @@ def data_3D_to_2D(x, options, pool):
 
 def eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, strng, instance):
 
-    tcm = None
+    if options.gpu:
+        tcm = torch.DoubleTensor(options.n_classes, options.n_classes).zero_().cuda(device=list(range(torch.cuda.device_count()))[-1])
+    else:
+        tcm = torch.DoubleTensor(options.n_classes, options.n_classes).zero_()
     tloss = None
     tlossD = None
     tSSIM = None
@@ -51,7 +54,7 @@ def eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, 
     printVal=PrintProgress()
     net.eval()
     with torch.no_grad():
-        for i in range(0,iterations):
+        for i in range(0, iterations):
 
             if options.dice == 'Mixed':
                 x, y, y_de = next(valDataloader)
@@ -76,25 +79,21 @@ def eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, 
                     y_d = y_d.reshape(batchsize, 1, options.input_size[0], options.input_size[1], options.input_size[2])
                 #x = torch.cat([y_d, x[:,:,5:-5,:,:]], dim=1)
                 #x = torch.cat([y_d, x], dim=1)
-            if options.model_type == 'VoxResNet':
-                y_pred, y1, y2, y3, y4 = net(x)
+
+            if options.dice == 'Mixed':
+                y_pred, y_pred2 = net(x)
+                lossD = criterion2(y_pred2, y_de)
                 loss = criterion(y_pred, y)
             else:
-                if options.dice == 'Mixed':
-                    y_pred, y_pred2 = net(x)
-                    lossD = criterion2(y_pred2, y_de)
-                    loss = criterion(y_pred, y)
-                else:
-                    y_pred = net(x)
-                    loss = criterion(y_pred, y)
+                y_pred = net(x)
+                loss = criterion(y_pred, y)
 
             if options.dice != 'MSE':
                 cm = meas_cm_weighted(y_pred, y, options.n_classes, options.gpu)
+                tcm += cm
                 if tloss is None:
-                    tcm = cm
                     tloss = loss
                 else:
-                    tcm += cm
                     tloss += loss
                 if options.dice == 'Mixed':
                     ss = ssim(y_de, y_pred2)
@@ -117,12 +116,12 @@ def eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, 
 
             statement = '%3.2f' % (acc)
 
-            if i == 0:
-                save_img(('%sImage_%03d.png' % (options.im_dest, instance)), x, y, y_pred, options)
-                if options.dice == 'Mixed':
-                    options.dice = 'MSE'
-                    save_img(('%sImage_D_%03d.png' % (options.im_dest, instance)), x, y_de, y_pred2, options)
-                    options.dice = 'Mixed'
+            if i==0:
+               save_img(('%sImage_%03d.png' % (options.im_dest, instance)), x, y, y_pred, options)
+               if options.dice == 'Mixed':
+                   options.dice = 'MSE'
+                   save_img(('%sImage_D_%03d.png' % (options.im_dest, instance)), x, y_de, y_pred2, options)
+                   options.dice = 'Mixed'
 
             #del y_pred
             #torch.cuda.empty_cache()
@@ -152,4 +151,3 @@ def eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, 
     if options.dice == 'MSE':
         return tcm, tloss / iterations, tlossD, tSSIM / iterations
     return tcm, tloss / iterations, tlossD, tSSIM
-

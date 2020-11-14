@@ -86,6 +86,7 @@ def meas_net_weighted(y_pred, y, n_cls, gpu=True):
         size = size[:1] + [n_cls] + size[1:]
         y_ex = torch.zeros(size).cuda()
         y_pred_ex = torch.zeros(size).cuda()
+        # Next Hot One Encryption
         for i in range(0, n_cls):
             y_ex[:, i, :] = y == i
             y_pred_ex[:, i, :] = y_pred == i
@@ -135,20 +136,45 @@ def meas_cm_weighted2(y_pred, y, n_cls, gpu=True):
     return cm
 
 
-def meas_cm_weighted(yp, y, n_classes, gpu=True, device=list(range(torch.cuda.device_count()))[-1]):
-    y=y.cuda(device=device)
-    yp=yp.cuda(device=device)
-    yp = F.softmax(yp, dim=1)
-    _, yp = yp.max(1)
+def meas_cm_weighted(yp, y, n_classes, gpu=True, device=0, softmax=True, threshold=True): # list(range(torch.cuda.device_count()))[-1]):
+    if gpu:
+        y=y.cuda(device=device)
+        yp=yp.cuda(device=device)
+    if softmax:
+        yp = F.softmax(yp, dim=1)
+    if threshold: 
+        _, yp = yp.max(1)
     x = yp.flatten() * n_classes + y.flatten()
     x = x.unsqueeze(0)
-    x2 = torch.FloatTensor(n_classes * n_classes, x.shape[1]).zero_()
+    x2 = torch.LongTensor(n_classes * n_classes, x.shape[1]).zero_()
     if gpu:
         x2 = x2.cuda(device=device)
+    x = x.type(torch.cuda.LongTensor)
     x2.scatter_(0, x, 1)
     res = torch.sum(x2, 1).reshape((n_classes, n_classes))
     return res
 
+def meas_cm_weighted_hmm(yp, y, n_classes, gpu=True, device=0, softmax=True): # list(range(torch.cuda.device_count()))[-1], binn=3):
+    y=y.cuda(device=device)
+    yp=yp.cuda(device=device)
+    if softmax:
+        yp = F.softmax(yp, dim=1)
+    pr = torch.max(yp, dim=1)
+    ypp=pr[0].flatten()
+    yp=pr[1].flatten()
+    y=y.flatten()
+    ypp = ypp*n_classes*binn/(n_classes-1) - binn/(n_classes-1)-1
+    ypp = torch.ceil(ypp)
+    ypp = binn * yp + ypp
+    x = y * n_classes * binn + ypp
+    x = x.unsqueeze(0)
+    x2 = torch.LongTensor(n_classes * n_classes * binn, x.shape[1]).zero_()
+    if gpu:
+        x2 = x2.cuda(device=device)
+    x = x.type(torch.cuda.LongTensor)
+    x2 = x2.scatter_(0, x, 1)
+    res = torch.sum(x2, 1).reshape(n_classes, n_classes*binn)
+    return res
 
 '''
 def meas_cm_weighted_fast(y_pred, y, sm, n_cls, gpu=True):
@@ -292,7 +318,6 @@ class SSIM(object):
             self.dimensions = dimensions
 
         return self._ssim(img1, img2)
-
 
 if __name__ == '__main__':
     # test=torch.randn(4,4,40,40).cuda()

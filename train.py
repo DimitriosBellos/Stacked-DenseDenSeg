@@ -2,6 +2,7 @@ import importlib
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
+from os.path import isfile, join
 import torch.nn.functional as F
 # from torch.autograd import Variable
 from torch import optim
@@ -10,9 +11,11 @@ import sys
 import os
 import gc
 from torch.utils.data import DataLoader
+# from tensorboardX import SummaryWriter
 import shutil
 import multiprocessing as mp
 from functools import partial
+import csv
 
 '''
 import utils.dataloader as dataload
@@ -41,15 +44,41 @@ class PolyLR(optim.lr_scheduler._LRScheduler):
 
 
 def par_3D_to_2D(x, options, itr):
-    i = int(np.floor(itr / int(x.shape[2]-options.input_channels+1)))
-    j = itr - i * int(x.shape[2]-options.input_channels+1)
-    return x[i, :, j:j+options.input_channels, :, :]
+    i = int(np.floor(itr / int(x.shape[2] - options.input_channels + 1)))
+    j = itr - i * int(x.shape[2] - options.input_channels + 1)
+    return x[i, :, j:j + options.input_channels, :, :]
 
 
 def data_3D_to_2D(x, options, pool):
     func = partial(par_3D_to_2D, x, options)
-    data = torch.cat(list(pool.map(func, range(0, x.shape[0]*(x.shape[2]-options.input_channels+1)))), dim=0)
+    data = torch.cat(list(pool.map(func, range(0, x.shape[0] * (x.shape[2] - options.input_channels + 1)))), dim=0)
     return data
+
+
+def calc_conf(tcm, n_classes, mask_class, gpu):
+    accuracy = np.zeros((2 * (n_classes + 1),))
+    for i in range(0, n_classes):
+        if gpu:
+            accuracy[i] = (tcm[i, i] / (tcm[:, i].sum() + tcm[i, :].sum() - tcm[i, i])).cpu().detach().numpy()
+        else:
+            accuracy[i] = (tcm[i, i] / (tcm[:, i].sum() + tcm[i, :].sum() - tcm[i, i])).detach().numpy()
+    if mask_class > 0:
+        accuracy[n_classes] = (accuracy[:mask_class].sum() + accuracy[mask_class + 1:n_classes].sum()) / (n_classes - 1)
+    else:
+        accuracy[n_classes] = accuracy[:n_classes].sum() / n_classes
+    tp_tn = tcm.trace()
+    for i in range(0, n_classes):
+        if gpu:
+            accuracy[i + n_classes + 1] = (tp_tn / (tp_tn + tcm[:, i].sum() + tcm[i, :].sum() - 2 * tcm[i, i])).cpu().detach().numpy()
+        else:
+            accuracy[i + n_classes + 1] = (tp_tn / (tp_tn + tcm[:, i].sum() + tcm[i, :].sum() - 2 * tcm[i, i])).detach().numpy()
+    if mask_class > 0:
+        accuracy[2 * n_classes + 1] = (accuracy[(n_classes + 1):(n_classes + 1 + mask_class)].sum() + accuracy[
+                                                                                                      (n_classes + mask_class + 2):(2 * n_classes + 1)].sum()) / (
+                                              n_classes - 1)
+    else:
+        accuracy[2 * n_classes + 1] = accuracy[(n_classes + 1):(2 * n_classes + 1)].sum() / n_classes
+    return accuracy
 
 
 def get_model(configuration, models):
@@ -68,9 +97,9 @@ def get_model(configuration, models):
                               MaxPool=down_samp, Kernel_size=3, Batchnorm=True, Stride=1, StridePool=2, Padding=1, Bias=False, trilinear=up_samp)
     elif configuration.model_type == 'UNet2D':
         network = models.UNet2D(configuration.input_channels, ignore_class=configuration.mask_class, n_classes=configuration.n_classes, n_layers=configuration.n_layers, fls=configuration.gr, MxPool=2,
-                              MaxPool=down_samp, Kernel_size=3, Batchnorm=False, Stride=1, StridePool=2, Padding=1, Bias=True, trilinear=up_samp)
+                                MaxPool=down_samp, Kernel_size=3, Batchnorm=False, Stride=1, StridePool=2, Padding=1, Bias=True, trilinear=up_samp)
     elif configuration.model_type == 'VoxResNet':
-        network = models.VoxResNet(in_channels=1, n_classes=configuration.n_classes)
+        network = models.VoxResNet()
     elif configuration.model_type == 'DenseNet':
         network = models.DenseNet(configuration.input_channels, configuration.n_classes, ignore_class=configuration.mask_class, k0=32, Theta=0.5, Dropout=0, Growth_rate=configuration.gr)
     elif configuration.model_type == 'DenseNet5L':
@@ -84,6 +113,7 @@ def get_model(configuration, models):
     elif configuration.model_type == 'DenseNetHalfScope':
         network = models.DenseNetHalfScope(configuration.input_channels, configuration.n_classes, ignore_class=configuration.mask_class, k0=32, Theta=0.5, Dropout=0.2, Growth_rate=configuration.gr)
     elif configuration.model_type == 'DenseUNet':
+        # print(configuration.input_channels)
         network = models.DenseUNet(configuration.input_channels, configuration.n_classes, ignore_class=configuration.mask_class, k0=32, Theta=0.5, Dropout=0.2, Growth_rate=configuration.gr)
     elif configuration.model_type == 'DenseUNet2D':
         network = models.DenseUNet2D(configuration.input_channels, configuration.n_classes, ignore_class=configuration.mask_class, k0=32, Theta=0.5, Dropout=0.2, Growth_rate=configuration.gr)
@@ -106,9 +136,8 @@ def get_model(configuration, models):
     return network
 
 
-def train_net(net, options, prenet, options2):
-
-    dataload = importlib.import_module('utils.dataloader')
+def train_net(net, options, prenet, options2, dataload):
+    # dataload = importlib.import_module('utils.dataloader')
     DiceLoss = getattr(importlib.import_module('utils.dice'), 'DiceLoss')
     Timer = getattr(importlib.import_module('utils.timer'), 'Timer')
     LoggerLite = getattr(importlib.import_module('utils.logger'), 'LoggerLite')
@@ -138,13 +167,46 @@ def train_net(net, options, prenet, options2):
             else:
                 data = dataload.Data(options, 'train')
 
+    if options.prenet:
+        if options2.CamVid:
+            data2 = dataload.Data_Brats(options2, 'train', filenam='2D_slices_Real.npz')
+        elif options2.dataSep:
+            if options2.data_3D:
+                data2 = dataload.Data3DSep(options2, 'train', filenam='2D_slices_Real.npz')
+            else:
+                data2 = dataload.DataSep(options2, 'train', filenam='2D_slices_Real.npz')
+        else:
+            if options2.data_3D:
+                if options2.input_fast:
+                    data2 = dataload.Data3D_fast(options2, 'train', filenam='2D_slices_Real.npz')
+                else:
+                    data2 = dataload.Data3D(options2, 'train', filenam='2D_slices_Real.npz')
+            else:
+                if options2.input_fast:
+                    data2 = dataload.Data_fast(options2, 'train', filenam='2D_slices_Real.npz')
+                else:
+                    data2 = dataload.Data(options2, 'train', filenam='2D_slices_Real.npz')
+
     # hist = Logger(options.root+'/history', 'w')
     # val = Logger(options.root+'/validations', 'w')
-    hist = LoggerLite(options.root + '/historyClasses', 'w')
-    val = LoggerLite(options.root + '/validationsClasses', 'w')
-    if options.dice != 'MSE':
-        conf_matrH = LoggerLite(options.root + '/conf_matrixesH', 'w')
-        conf_matrV = LoggerLite(options.root + '/conf_matrixesV', 'w')
+    if options.testing_case:
+        val = LoggerLite(options.root + '/validationsClasses', 'a')
+        if options.dice != 'MSE':
+            conf_matrV = LoggerLite(options.root + '/conf_matrixesV2', 'a')
+        if options.prenet:
+            val2 = LoggerLite(options.root + '/validationsClassesReal', 'a')
+            if options.dice != 'MSE':
+                conf_matrV2 = LoggerLite(options.root + '/conf_matrixesVReal', 'a')
+    else:
+        hist = LoggerLite(options.root + '/historyClasses', 'w')
+        val = LoggerLite(options.root + '/validationsClasses', 'w')
+        if options.dice != 'MSE':
+            conf_matrH = LoggerLite(options.root + '/conf_matrixesH2', 'w')
+            conf_matrV = LoggerLite(options.root + '/conf_matrixesV2', 'w')
+        if options.prenet:
+            val2 = LoggerLite(options.root + '/validationsClassesReal', 'w')
+            if options.dice != 'MSE':
+                conf_matrV2 = LoggerLite(options.root + '/conf_matrixesVReal', 'w')
 
     # hist.setNames(('instance', 'Accuracy', 'Time'))
     # val.setNames(('epoch', 'Accuracy', 'Time'))#
@@ -165,8 +227,11 @@ def train_net(net, options, prenet, options2):
                     t = (r,)
                 else:
                     t = t + (r,)
-        conf_matrH.setNames(t)
-        conf_matrV.setNames(t)
+        if options.testing_case is False:
+            conf_matrH.setNames(t)
+            conf_matrV.setNames(t)
+            if options.prenet:
+                conf_matrV2.setNames(t)
     t = ('Epoch', 'Loss')
     if options.dice != 'MSE':
         for k in range(0, 2):
@@ -186,32 +251,47 @@ def train_net(net, options, prenet, options2):
         t = t + ('SSIM',)
     t = t + ('Time',)
     # hist.setNames(('Epoch', 'Acc', 'Time'))
-    hist.setNames(t)
-    val.setNames(t)
+    if options.testing_case is False:
+        hist.setNames(t)
+        val.setNames(t)
+        if options.prenet:
+            val2.setNames(t)
+
     if options.dice == 'Mixed':
-        histD = LoggerLite(options.root + '/historyClassesDenoise', 'w')
-        valD = LoggerLite(options.root + '/validationsClassesDenoise', 'w')
-        t = ('Epoch', 'Loss', 'SSIM', 'Time')
-        histD.setNames(t)
-        valD.setNames(t)
+        if options.testing_case:
+            valD = LoggerLite(options.root + '/validationsClassesDenoise', 'a')
+            if options.prenet:
+                valD2 = LoggerLite(options.root + '/validationsClassesDenoiseReal', 'a')
+        else:
+            histD = LoggerLite(options.root + '/historyClassesDenoise', 'w')
+            valD = LoggerLite(options.root + '/validationsClassesDenoise', 'w')
+            t = ('Epoch', 'Loss', 'SSIM', 'Time')
+            histD.setNames(t)
+            valD.setNames(t)
+            if options.prenet:
+                valD2 = LoggerLite(options.root + '/validationsClassesDenoiseReal', 'w')
+                valD2.setNames(t)
 
     if options.optmethod is 'sgd':
         optimizer = optim.SGD(net.parameters(), lr=options.lr, momentum=options.momentum)
     elif options.optmethod is 'rmsprop':
         optimizer = optim.RMSprop(net.parameters())
     else:
-        optimizer = optim.Adam(net.parameters(), lr=options.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=options.weig_dec)
-        # optimizer = optim.Adam([{'params': net.module.inc.parameters(), 'lr': options.lr*10},
-        #                         {'params': net.module.D1.parameters(), 'lr': options.lr*10},
-        #                         {'params': net.module.c1.parameters()},
-        #                         {'params': net.module.c2.parameters()},
-        #                         {'params': net.module.D2.parameters()}],
-        #                        lr=options.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=options.weig_dec)
+        if options.dice != 'Mixed':
+            optimizer = optim.Adam(net.parameters(), lr=options.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=options.weig_dec)
+        else:
+            optimizer = optim.Adam([{'params': net.module.inc.parameters(), 'lr': options.lr * 10},
+                                    {'params': net.module.D1.parameters(), 'lr': options.lr * 10},
+                                    {'params': net.module.c1.parameters()},
+                                    {'params': net.module.c2.parameters()},
+                                    {'params': net.module.D2.parameters()}],
+                                   lr=options.lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=options.weig_dec)
 
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=options.epochs / 2, gamma=0.1)
-    #scheduler.last_epoch = 7
+    # scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10, 40], gamma=0.1)
+    # scheduler.last_epoch = 7
     # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1)
-    #scheduler = PolyLR(optimizer, options.epochs*instances)
+    # scheduler = PolyLR(optimizer, options.epochs*instances)
 
     criterion2 = None
 
@@ -224,41 +304,18 @@ def train_net(net, options, prenet, options2):
             criterion = DiceLoss()
     elif options.dice == 'MSE':
         criterion = nn.MSELoss()
-        criterion1 = nn.MSELoss()
-        criterion2 = nn.MSELoss()
-        criterion3 = nn.MSELoss()
-        criterion4 = nn.MSELoss()
-        if options.gpu:
-            criterion1.cuda()
-            criterion2.cuda()
-            criterion3.cuda()
-            criterion4.cuda()
     else:
-        if options.model_type == 'VoxResNet':
+        if options.weighted:
             if options.gpu:
                 data.weights = data.weights.cuda()
-            criterion = nn.CrossEntropyLoss(weight=data.weights, ignore_index=options.mask_class)
-            criterion1 = nn.CrossEntropyLoss(weight=data.weights, ignore_index=options.mask_class)
-            criterion2 = nn.CrossEntropyLoss(weight=data.weights, ignore_index=options.mask_class)
-            criterion3 = nn.CrossEntropyLoss(weight=data.weights, ignore_index=options.mask_class)
-            criterion4 = nn.CrossEntropyLoss(weight=data.weights, ignore_index=options.mask_class)
-            if options.gpu:
-                criterion1.cuda()
-                criterion2.cuda()
-                criterion3.cuda()
-                criterion4.cuda()
+            criterion = nn.CrossEntropyLoss(weight=data.weights,
+                                            ignore_index=options.mask_class)
         else:
-            if options.weighted:
-                if options.gpu:
-                    data.weights = data.weights.cuda()
-                criterion = nn.CrossEntropyLoss(weight=data.weights,
-                                                ignore_index=options.mask_class)
-            else:
-                criterion = nn.CrossEntropyLoss(ignore_index=options.mask_class)
-            if options.dice == 'Mixed':
-                criterion2 = nn.MSELoss()
-                if options.gpu:
-                    criterion2.cuda()
+            criterion = nn.CrossEntropyLoss(ignore_index=options.mask_class)
+        if options.dice == 'Mixed':
+            criterion2 = nn.MSELoss()
+            if options.gpu:
+                criterion2.cuda()
 
     if options.gpu:
         criterion.cuda()
@@ -274,9 +331,9 @@ def train_net(net, options, prenet, options2):
     tloss = None
     tlossD = None
     tSSIM = None
-    critical_value = None
-    idx = None
-    #scheduler = PolyLR(optimizer, options.epochs*instances)
+    critical_value = 0
+    idx = 0
+    # scheduler = PolyLR(optimizer, options.epochs*instances)
     if options.prenet != 'None':
         pool = mp.Pool(processes=options.workers)
     else:
@@ -284,8 +341,8 @@ def train_net(net, options, prenet, options2):
 
     net.train()
     printTrain = PrintProgress()
-    while epoch <= options.epochs:
-        trainDataloader = iter(DataLoader(dataset=data, batch_size=options.batchsize, num_workers=mp.cpu_count()))
+    while epoch <= options.epochs and options.testing_case is False:
+        trainDataloader = iter(DataLoader(dataset=data, batch_size=options.batchsize, num_workers=options.workers))
         for instance in range(0, instances):
             if epoch <= options.epochs:
                 if (counter_before_epoch == 0) or (instance == 0):
@@ -315,7 +372,7 @@ def train_net(net, options, prenet, options2):
                     if options.dice == 'Mixed':
                         y_de = y_de.cuda()
 
-                #scheduler.step()
+                # scheduler.step()
 
                 optimizer.zero_grad()
 
@@ -324,25 +381,24 @@ def train_net(net, options, prenet, options2):
                         x = prenet(x)
                         if options.data_3D == True and options2.data_3D == False:
                             y_d = y_d.reshape(batchsize, 1, options.input_size[0], options.input_size[1], options.input_size[2])
-                        #x = torch.cat([y_d, x[:,:,5:-5,:,:]], dim=1)
-                        #x = torch.cat([y_d, x], dim=1)
-                        #x = trans_data(y_d, x)
-                if options.model_type == 'VoxResNet':
-                    y_pred, y_pred1, y_pred2, y_pred3, y_pred4 = net(x)
+                        # x = torch.cat([y_d, x[:,:,5:-5,:,:]], dim=1)
+                        # x = torch.cat([y_d, x], dim=1)
+                        # x = trans_data(y_d, x)
+
+                if options.dice == 'Mixed':
+                    y_pred, y_pred2 = net(x)
+                    lossD = criterion2(y_pred2, y_de)
                     loss = criterion(y_pred, y)
-                    loss1 = criterion1(y_pred1, y)
-                    loss2 = criterion2(y_pred2, y)
-                    loss3 = criterion3(y_pred3, y)
-                    loss4 = criterion4(y_pred4, y)
-                    loss += loss1 + loss2 + loss3 + loss4
+                    loss = loss + 10 * lossD
+                    # el = loss/lossD
+                    # if el > 1:
+                    #     el = np.round(el)
+                    # else:
+                    #     el = 1 / np.round(1 / el)
+                    # loss = loss + el * lossD
                 else:
-                    if options.dice == 'Mixed':
-                        y_pred, y_pred2 = net(x)
-                        lossD = 6 * criterion2(y_pred2, y_de)
-                        loss = criterion(y_pred, y) + lossD
-                    else:
-                        y_pred = net(x)
-                        loss = criterion(y_pred, y)
+                    y_pred = net(x)
+                    loss = criterion(y_pred, y)
 
                 loss.backward()
 
@@ -379,40 +435,37 @@ def train_net(net, options, prenet, options2):
                     acc = loss
                     statement = '%f' % acc
 
-
                 # wr.add_scalar('%s/Train/accuracy' % options.name, acc, itr*instances+instance)
 
                 printTrain(instance + 1, instances, [statement])
 
                 counter_before_epoch += 1
                 if counter_before_epoch == options.val_freq:
-                    tloss = tloss.cpu().detach().numpy() / options.val_freq
+                    if options.gpu:
+                        tloss = tloss.cpu().detach().numpy() / options.val_freq
+                    else:
+                        tloss = tloss.detach().numpy() / options.val_freq
                     time = timer.get_value()
                     if options.dice != 'MSE':
-                        accuracy = np.zeros((2 * (n_classes + 1),))
-                        for i in range(0, n_classes):
-                            accuracy[i] = (tcm[i, i] / (tcm[:, i].sum() + tcm[i, :].sum() - tcm[i, i])).cpu().detach().numpy()
-                        if options.mask_class > 0:
-                            accuracy[n_classes] = (accuracy[:options.mask_class].sum() + accuracy[options.mask_class + 1:n_classes].sum()) / (n_classes - 1)
+                        accuracy = calc_conf(tcm, n_classes, options.mask_class)
+                        if options.gpu:
+                            conf_matrH.add(tcm.cpu().detach().numpy().flatten())
                         else:
-                            accuracy[n_classes] = accuracy[:n_classes].sum() / n_classes
-                        tp_tn = tcm.trace()
-                        for i in range(0, n_classes):
-                            accuracy[i + n_classes + 1] = (tp_tn / (tp_tn + tcm[:, i].sum() + tcm[i, :].sum() - 2 * tcm[i, i])).cpu().detach().numpy()
-                        if options.mask_class > 0:
-                            accuracy[2 * n_classes + 1] = (accuracy[(n_classes + 1):(n_classes + 1 + options.mask_class)].sum() + accuracy[
-                                                                                                                                  (n_classes + options.mask_class + 2):(2 * n_classes + 1)].sum()) / (
-                                                                      n_classes - 1)
-                        else:
-                            accuracy[2 * n_classes + 1] = accuracy[(n_classes + 1):(2 * n_classes + 1)].sum() / n_classes
-                        conf_matrH.add(tcm.cpu().detach().numpy().flatten())
+                            conf_matrH.add(tcm.detach().numpy().flatten())
                         hist.add([epoch] + [tloss] + list(accuracy) + [time])
                         if options.dice == 'Mixed':
-                            tlossD = tlossD.cpu().detach().numpy() / options.val_freq
-                            tSSIM = tSSIM.cpu().detach().numpy() / options.val_freq
+                            if options.gpu:
+                                tlossD = tlossD.cpu().detach().numpy() / options.val_freq
+                                tSSIM = tSSIM.cpu().detach().numpy() / options.val_freq
+                            else:
+                                tlossD = tlossD.detach().numpy() / options.val_freq
+                                tSSIM = tSSIM.detach().numpy() / options.val_freq
                             histD.add([epoch] + [tlossD] + [tSSIM] + [time])
                     else:
-                        tSSIM = tSSIM.cpu().detach().numpy() / options.val_freq
+                        if options.gpu:
+                            tSSIM = tSSIM.cpu().detach().numpy() / options.val_freq
+                        else:
+                            tSSIM = tSSIM.detach().numpy() / options.val_freq
                         hist.add([epoch] + [tloss] + [tSSIM] + [time])
 
                     counter_before_epoch = 0
@@ -423,27 +476,14 @@ def train_net(net, options, prenet, options2):
 
                     time = timer.get_value()
                     if options.dice != 'MSE':
-                        accuracy = np.zeros((2 * (n_classes + 1),))
-                        for i in range(0, n_classes):
-                            accuracy[i] = (tcm[i, i] / (tcm[:, i].sum() + tcm[i, :].sum() - tcm[i, i])).cpu().detach().numpy()
-                        if options.mask_class > 0:
-                            accuracy[n_classes] = (accuracy[:options.mask_class].sum() + accuracy[options.mask_class + 1:n_classes].sum()) / (n_classes - 1)
+                        accuracy = calc_conf(tcm, n_classes, options.mask_class, options.gpu)
+                        if options.gpu:
+                            conf_matrV.add(tcm.cpu().detach().numpy().flatten())
                         else:
-                            accuracy[n_classes] = accuracy[:n_classes].sum() / n_classes
-                        tp_tn = tcm.trace()
-                        for i in range(0, n_classes):
-                            accuracy[i + n_classes + 1] = (tp_tn / (tp_tn + tcm[:, i].sum() + tcm[i, :].sum() - 2 * tcm[i, i])).cpu().detach().numpy()
-                        if options.mask_class > 0:
-                            accuracy[2 * n_classes + 1] = (accuracy[(n_classes + 1):(n_classes + 1 + options.mask_class)].sum() + accuracy[
-                                                                                                                                  (n_classes + options.mask_class + 2):(2 * n_classes + 1)].sum()) / (
-                                                                      n_classes - 1)
-                        else:
-                            accuracy[2 * n_classes + 1] = accuracy[(n_classes + 1):(2 * n_classes + 1)].sum() / n_classes
-                        conf_matrV.add(tcm.cpu().detach().numpy().flatten())
+                            conf_matrV.add(tcm.detach().numpy().flatten())
                         val.add([epoch] + [tloss] + list(accuracy) + [time])
                         if options.dice == 'Mixed':
                             valD.add([epoch] + [tlossD] + [tSSIM] + [time])
-
                         if critical_value is None:
                             critical_value = accuracy[n_classes]
                             idx = epoch
@@ -452,9 +492,7 @@ def train_net(net, options, prenet, options2):
                                 critical_value = accuracy[n_classes]
                                 idx = epoch
                     else:
-
                         val.add([epoch] + [tloss] + [tSSIM] + [time])
-
                         if critical_value is None:
                             critical_value = tloss
                             idx = epoch
@@ -462,47 +500,84 @@ def train_net(net, options, prenet, options2):
                             if critical_value > tloss:
                                 critical_value = tloss
                                 idx = epoch
+                    # wr.add_scalar('%s/Validation/accuracy' % options.name, accuracy[2*n_classes+1], epoch)
+
+                    if options.prenet:
+                        tcm, tloss, tlossD, tSSIM = eval_net(net, prenet, criterion, criterion2, options2, options, pool, data2, ['Validation', 'val'], epoch)
+                        if options.dice != 'MSE':
+                            accuracy = calc_conf(tcm, n_classes, options.mask_class, options.gpu)
+                            conf_matrV2.add(tcm.flatten())
+                            val2.add([epoch] + [tloss] + list(accuracy) + [time])
+                            if options.dice == 'Mixed':
+                                valD2.add([epoch] + [tlossD] + [tSSIM] + [time])
+                        else:
+                            val2.add([epoch] + [tloss] + [tSSIM] + [time])
 
                     tcm = None
                     tloss = None
-                    tlossD = None
-                    tSSIM = None
-                    # wr.add_scalar('%s/Validation/accuracy' % options.name, accuracy[2*n_classes+1], epoch)
                     epoch += 1
             else:
                 break
         itr += 1
 
-    net.load_state_dict(torch.load(options.cp_dest + 'CP{}.pth'.format(idx)))
-    tcm, tloss, tlossD, tSSIM = eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, ['Testing', 'test'], epoch)
-    torch.save(net.state_dict(), options.cp_dest + 'Best_model.pth')
+    if options.testing_case:
+        x = []
+        with open(options.root + '/validationsClasses.csv', 'r') as csvfile:
+            plots = csv.reader(csvfile, delimiter='\t')
+            rk = 0
+            for row in plots:
+                if rk == 1:
+                    x.append(float(row[6]))
+                else:
+                    rk = 1
+        idx = x.index(max(x)) + 1
+        epoch = len(x) + 1
+    if not isfile(options.cp_dest + 'Best_model.pth'):
+        net.load_state_dict(torch.load(options.cp_dest + 'CP{}.pth'.format(idx)))
+    else:
+        net.load_state_dict(torch.load(options.cp_dest + 'Best_model.pth'))
+    tcm, tloss, tlossD, tSSIM= eval_net(net, prenet, criterion, criterion2, options, options2, pool, data, ['Testing', 'test'], epoch)
+    if not isfile(options.cp_dest + 'Best_model.pth'):
+        torch.save(net.state_dict(), options.cp_dest + 'Best_model.pth')
     time = timer.get_value()
     if options.dice != 'MSE':
-        accuracy = np.zeros((2 * (n_classes + 1),))
-        for i in range(0, n_classes):
-            accuracy[i] = (tcm[i, i] / (tcm[:, i].sum() + tcm[i, :].sum() - tcm[i, i])).cpu().detach().numpy()
-        accuracy[n_classes] = accuracy[:n_classes].sum() / n_classes
-        tp_tn = tcm.trace()
-        for i in range(0, n_classes):
-            accuracy[i + n_classes + 1] = (tp_tn / (tp_tn + tcm[:, i].sum() + tcm[i, :].sum() - 2 * tcm[i, i])).cpu().detach().numpy()
-        accuracy[2 * n_classes + 1] = (tcm.trace() / tcm.sum()).cpu().detach().numpy()
-        conf_matrV.add(tcm.flatten())
+        accuracy = calc_conf(tcm, n_classes, options.mask_class)
+        if options.gpu:
+            conf_matrV.add(tcm.cpu().detach().numpy().flatten())
+        else:
+            conf_matrV.add(tcm.detach().numpy().flatten())
         val.add([epoch] + [tloss] + list(accuracy) + [time])
         if options.dice == 'Mixed':
             valD.add([epoch] + [tlossD] + [tSSIM] + [time])
     else:
         val.add([epoch] + [tloss] + [tSSIM] + [time])
+    if options.prenet:
+        tcm, tloss, tlossD, tSSIM = eval_net(net, prenet, criterion, criterion2, options2, options, pool, data2, ['Testing', 'test'], epoch)
+        if options.dice != 'MSE':
+            accuracy = calc_conf(tcm, n_classes, options.mask_class, options.gpu)
+            if options.gpu:
+                conf_matrV2.add(tcm.cpu().detach().numpy().flatten())
+            else:
+                conf_matrV2.add(tcm.cpu().detach().numpy().flatten())
+            val2.add([epoch] + [tloss] + list(accuracy) + [time])
+            if options.dice == 'Mixed':
+                valD2.add([epoch] + [tlossD] + [tSSIM] + [time])
+        else:
+            val2.add([epoch] + [tloss] + [tSSIM] + [time])
 
     return
 
 
 if __name__ == '__main__':
 
-    opname = sys.argv[0].split("/")[-1]
-    opname = 'opts%s' % opname[5:]
+    diname = sys.argv[0].split("/")[-1]
+    opname = 'opts%s' % diname[5:]
+    daname = 'dataloader%s' % diname[5:]
     opname = opname[:-3]
+    daname = daname[:-3]
 
     Options = getattr(importlib.import_module(opname), 'Options')
+    dataload = importlib.import_module(daname)
 
     parser = Options()
     (configuration, args) = parser.parse_args()
@@ -517,17 +592,20 @@ if __name__ == '__main__':
         parser = Options2()
         (configuration2, args) = parser.parse_args()
 
-    sys.path.append('/home/psxdb3/Code_Folder/SemSegOld')
+    sys.path.append('/home/psxdb3/Code_Folder/SemSegOldDiamondX')
 
     models = importlib.import_module('models')
 
     torch.manual_seed(configuration.manual_seed)
 
     tmp = configuration.input_filename.split(",")
-    configuration.input_filename = np.array(tmp)[0]
+    configuration.input_filename = np.array(tmp)
 
     tmp = configuration.annotations_filename.split(",")
-    configuration.annotations_filename = np.array(tmp)[0]
+    configuration.annotations_filename = np.array(tmp)
+
+    tmp = configuration.intermediate_filename.split(",")
+    configuration.intermediate_filename = np.array(tmp)
 
     tmp = configuration.input_size.split(",")
     configuration.input_size = [int(x.strip()) for x in tmp]
@@ -553,7 +631,13 @@ if __name__ == '__main__':
 
     tmp = configuration.input_area.split(",")
     configuration.input_area = [int(x.strip()) for x in tmp]
-    configuration.input_area = np.vstack((configuration.input_area[0:3], configuration.input_area[3:6]))
+    for i in range(0, (int(len(configuration.input_area) / 6))):
+        tmp = np.vstack((configuration.input_area[i * 6:i * 6 + 3], configuration.input_area[i * 6 + 3:i * 6 + 6]))
+        if i == 0:
+            tmp2 = np.expand_dims(tmp, axis=0)
+        else:
+            tmp2 = np.append(tmp2, np.expand_dims(tmp, axis=0), axis=0)
+    configuration.input_area = tmp2
 
     tmp = configuration.output_area.split(",")
     configuration.output_area = [int(x.strip()) for x in tmp]
@@ -581,21 +665,23 @@ if __name__ == '__main__':
         network.cuda()
         cudnn.benchmark = not configuration.deterministic
         cudnn.deterministic = configuration.deterministic
-        #os.environ['CUDA_VISIBLE_DEVICES'] = configuration.gpu_devices
+        # os.environ['CUDA_VISIBLE_DEVICES'] = configuration.gpu_devices
         if configuration.parallel:
             network = torch.nn.DataParallel(network, device_ids=list(range(torch.cuda.device_count()))[:4], output_device=list(range(torch.cuda.device_count()))[0])
 
     if configuration.load != '0':
-        network.load_state_dict(torch.load(configuration.cp_dest+configuration.load))
+        network.load_state_dict(torch.load(configuration.load))
         print('Model loaded from {}'.format(configuration.load))
 
     if configuration.prenet:
-
         tmp = configuration2.input_filename.split(",")
-        configuration2.input_filename = np.array(tmp)[0]
+        configuration2.input_filename = np.array(tmp)
 
         tmp = configuration2.annotations_filename.split(",")
-        configuration2.annotations_filename = np.array(tmp)[0]
+        configuration2.annotations_filename = np.array(tmp)
+
+        tmp = configuration2.intermediate_filename.split(",")
+        configuration2.intermediate_filename = np.array(tmp)
 
         tmp = configuration2.input_size.split(",")
         configuration2.input_size = [int(x.strip()) for x in tmp]
@@ -621,7 +707,13 @@ if __name__ == '__main__':
 
         tmp = configuration2.input_area.split(",")
         configuration2.input_area = [int(x.strip()) for x in tmp]
-        configuration2.input_area = np.vstack((configuration2.input_area[0:3], configuration2.input_area[3:6]))
+        for i in range(0, (int(len(configuration2.input_area) / 6))):
+            tmp = np.vstack((configuration2.input_area[i * 6:i * 6 + 3], configuration2.input_area[i * 6 + 3:i * 6 + 6]))
+            if i == 0:
+                tmp2 = np.expand_dims(tmp, axis=0)
+            else:
+                tmp2 = np.append(tmp2, np.expand_dims(tmp, axis=0), axis=0)
+        configuration2.input_area = tmp2
 
         tmp = configuration2.output_area.split(",")
         configuration2.output_area = [int(x.strip()) for x in tmp]
@@ -630,15 +722,15 @@ if __name__ == '__main__':
         if configuration2.prunned_classes != 'None':
             tmp = configuration2.prunned_classes.split(",")
             configuration2.prunned_classes = [int(x.strip()) for x in tmp]
-            configuration2.prunned_classes = np.vstack((configuration2.prunned_classes[0:len(configuration2.prunned_classes):2], configuration2.prunned_classes[1:len(configuration2.prunned_classes):2]))
+            configuration2.prunned_classes = np.vstack(
+                (configuration2.prunned_classes[0:len(configuration2.prunned_classes):2], configuration2.prunned_classes[1:len(configuration2.prunned_classes):2]))
         else:
             configuration2.prunned_classes = np.array([[-1], [-1]])
 
-        configuration2.root = configuration2.root + configuration2.name
-        configuration2.cp_dest = configuration2.root + configuration2.cp_dest
-        configuration2.im_dest = configuration2.root + configuration2.im_dest
-        configuration2.tb_dest = configuration2.root + configuration2.tb_dest
-
+        configuration2.cp_dest = configuration.root + configuration2.cp_dest
+        configuration2.im_dest = configuration.root + configuration2.im_dest
+        configuration2.tb_dest = configuration.root + configuration2.tb_dest
+        '''
         prenet = get_model(configuration2, models)
 
         if configuration.gpu:
@@ -651,14 +743,15 @@ if __name__ == '__main__':
             print('Model loaded from {}'.format(configuration2.load))
 
         prenet.eval()
+        '''
+        prenet = 'None'
     else:
-        configuration2='None'
-        prenet='None'
+        configuration2 = 'None'
+        prenet = 'None'
 
     try:
-        train_net(network, configuration, prenet, configuration2)
+        train_net(network, configuration, prenet, configuration2, dataload)
     except KeyboardInterrupt:
         torch.save(network.state_dict(), configuration.root + '/INTERRUPTED.pth')
         print('Saved interrupt')
         sys.exit(0)
-

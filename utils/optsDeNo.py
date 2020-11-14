@@ -19,7 +19,7 @@ def Options():
     parser.add_option('--momentum', dest='momentum', default=0.1, type='float', help='Learning Rate (default:0.1)')
     parser.add_option('--batch-size', dest='batchsize', default=7, type='int', help='Batch Size (default:8)')
     parser.add_option('--opt-method', dest='optmethod', default='adam', type='choice', choices=['rmsprop', 'sgd', 'adam'], help='Select Optimizer (default:adam)')
-    parser.add_option('--load', dest='load', default='0', type='string', help='Load Saved Model') #TODO
+    parser.add_option('--load', dest='load', default='0', type='string', help='Load Saved Model')
     parser.add_option('--weighted', action='store_false', dest='weighted', default=True, help='Use weights in criterion (True/False)')
     parser.add_option('--reduce', action='store_false', dest='reduce', default=True, help='Use reduce dimensions in criterion (True/False)')
     #-----------------------------------------------Data options----------------------------------------------------------

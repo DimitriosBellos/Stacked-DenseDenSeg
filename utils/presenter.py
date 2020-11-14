@@ -74,7 +74,11 @@ class PrintProgress(object):
         if platform.system() == 'Windows':
             return 80
         tputf = os.popen('tput cols', 'r')
-        w = int(tputf.read().split('\n')[0])
+        w = tputf.read().split('\n')[0]
+        if w.isdigit():
+            w = int(w)
+        else:
+            w = 80
         tputf.close()
         return w
 

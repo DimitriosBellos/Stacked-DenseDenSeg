@@ -20,7 +20,7 @@ class VoxResModule(nn.Module):
 
 
 class VoxResNet(nn.Module):
-    def __init__(self, in_channels=1, n_classes=1):
+    def __init__(self, in_channels=1, n_classes=4):
         super(VoxResNet, self).__init__()
         self.conv1a = nn.Conv3d(in_channels, 32, 3, padding=1)
         self.bnorm1a = nn.BatchNorm3d(32)
@@ -45,7 +45,6 @@ class VoxResNet(nn.Module):
         self.c3conv = nn.Conv3d(64, n_classes, 3, padding=1)
         self.c4deconv = nn.ConvTranspose3d(64, 64, 10, stride=8, padding=1)
         self.c4conv = nn.Conv3d(64, n_classes, 3, padding=1)
-        self.out = nn.Conv3d(n_classes, n_classes, 1, padding=0, bias=False)
 
     def forward(self, x):
         h = self.conv1a(x)
@@ -76,9 +75,8 @@ class VoxResNet(nn.Module):
         c4 = self.c4conv(c4)
 
         c = c1 + c2 + c3 + c4
-        c = self.out(c)
 
-        return c, c1, c2, c3, c4
+        return c
 
 
 class VoxResModule_2D(nn.Module):

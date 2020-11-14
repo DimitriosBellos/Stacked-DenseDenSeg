@@ -76,8 +76,9 @@ class LoggerLite(object):
         else:
             self.name = filename
         self.mode = mode
-        self.file = open(self.name, self.mode)
-        self.file.close()
+        if self.mode == 'w':
+            self.file = open(self.name, 'w')
+            self.file.close()
 
     def setNames(self, names):
         if (self.mode != 'w') and (self.mode != 'a'):

@@ -65,8 +65,8 @@ class DenseConv(nn.Module):
     def __init__(self, in_ch, Groth_Rate=16, Dropout=0.2, Batchnorm=True, Kernel_size=3, Stride=1, Padding=1, Bias=True):
         super(DenseConv, self).__init__()
         self.dconv = nn.Sequential(
-            conv_layer2(in_ch, 64, Batchnorm, 1, 1, 0, Bias),
-            conv_layer2(64, Groth_Rate, Batchnorm, Kernel_size, Stride, Padding, Bias),
+            conv_layer2(in_ch, 256, Batchnorm, 1, 1, 0, Bias),
+            conv_layer2(256, Groth_Rate, Batchnorm, Kernel_size, Stride, Padding, Bias),
             nn.Dropout3d(p=Dropout, inplace=True)
         )
 

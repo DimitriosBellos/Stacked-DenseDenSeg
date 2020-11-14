@@ -189,15 +189,17 @@ class DenseNetStack(nn.Module):
         super(DenseNetStack, self).__init__()
         self.inc = inconv(n_channels, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.D1 = DenseNetDenoise(n_channels, 1, ignore_class, k0, Theta, Dropout, Growth_rate, Kernel_size, Batchnorm, Stride, Padding, Bias)
-        self.c1 = conv_layer(k0 + 4 * 4, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
-        self.c2 = conv_layer(1, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
+        self.c1a = conv_layer2(k0 + 4 * 4, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
+        self.c1b = conv_layer2(k0, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
+        self.c2b = conv_layer2(1, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.D2 = DenseNet(n_channels, n_classes, ignore_class, k0, Theta, Dropout, Growth_rate, Kernel_size, Batchnorm, Stride, Padding, Bias)
 
     def forward(self, x):
         x1a = self.inc(x)
         x, x_1 = self.D1(x1a)
-        x = self.c1(x)
-        x1b = self.c2(x_1)
+        x = self.c1a(x)
+        x = self.c1b(x)
+        x1b = self.c2b(x_1)
         x = x1a + x1b + x 
         x_2 = self.D2(x)
         return x_2, x_1
@@ -206,7 +208,6 @@ class DenseNetStack(nn.Module):
 class DenseUNetDenoise(nn.Module):
     def __init__(self, n_channels, n_classes, ignore_class=-100, k0=32, Theta=0.5, Dropout=0.2, Growth_rate=16, Kernel_size=3, Batchnorm=True, Stride=1, Padding=1, Bias=False):
         super(DenseUNetDenoise, self).__init__()
-        #self.inc = inconv(n_channels, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.down = conv_layer2(k0, k0, Batchnorm, 2, 2, 0, Bias)
         self.db1 = DenseBlock(k0, Growth_rate, Dropout, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.in_ch = int(k0 + 4 * Growth_rate)
@@ -236,16 +237,8 @@ class DenseUNetDenoise(nn.Module):
         self.out = conv_layer2(k0, n_classes, Batchnorm, 1, 1, 0, Bias)
         self.ignore_class = ignore_class
         # self.sfmx = nn.Softmax(1)
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm3d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
 
     def forward(self, x1):
-        #x1 = self.inc(x)
         x = self.down(x1)
         x2 = self.db1(x)
         x = self.tr1(x2)
@@ -273,11 +266,26 @@ class DenseUNetDenoise(nn.Module):
             x = torch.cat((x[:, :(self.ignore_class), :], torch.zeros(s), x[:, (self.ignore_class):, :]), dim=1)
         return x, x_1
 
-
 class DenseUNet(nn.Module):
     def __init__(self, n_channels, n_classes, ignore_class=-100, k0=32, Theta=0.5, Dropout=0.2, Growth_rate=16, Kernel_size=3, Batchnorm=True, Stride=1, Padding=1, Bias=False):
         super(DenseUNet, self).__init__()
-        #self.inc = inconv(n_channels, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
+        self.inc = inconv(n_channels, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
+        self.DenseU = DenseUNetStrip(n_channels, n_classes, ignore_class, k0, Theta, 0, Growth_rate, Kernel_size, Batchnorm, Stride, Padding, Bias)
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm3d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x = self.DenseU(x1)
+        return x
+
+class DenseUNetStrip(nn.Module):
+    def __init__(self, n_channels, n_classes, ignore_class=-100, k0=32, Theta=0.5, Dropout=0.2, Growth_rate=16, Kernel_size=3, Batchnorm=True, Stride=1, Padding=1, Bias=False):
+        super(DenseUNetStrip, self).__init__()
         self.down = conv_layer2(k0, k0, Batchnorm, 2, 2, 0, Bias)
         self.db1 = DenseBlock(k0, Growth_rate, Dropout, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.in_ch = int(k0 + 4 * Growth_rate)
@@ -307,16 +315,8 @@ class DenseUNet(nn.Module):
         self.out = conv_layer2(k0, n_classes, Batchnorm, 1, 1, 0, Bias)
         self.ignore_class = ignore_class
         # self.sfmx = nn.Softmax(1)
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm3d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
 
     def forward(self, x1):
-        #x1 = self.inc(x)
         x = self.down(x1)
         x2 = self.db1(x)
         x = self.tr1(x2)
@@ -353,7 +353,13 @@ class DenseUNetStack(nn.Module):
         #self.c = inconv(1, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.c1 = conv_layer(k0, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
         self.c2 = conv_layer(1, k0, Batchnorm, Kernel_size, Stride, Padding, Bias)
-        self.D2 = DenseUNet(n_channels, n_classes, ignore_class, k0, Theta, 0, Growth_rate, Kernel_size, Batchnorm, Stride, Padding, Bias)
+        self.D2 = DenseUNetStrip(n_channels, n_classes, ignore_class, k0, Theta, 0, Growth_rate, Kernel_size, Batchnorm, Stride, Padding, Bias)
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm3d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         x1a = self.inc(x)
