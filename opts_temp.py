@@ -1,0 +1,63 @@
+from optparse import OptionParser
+from optparse import IndentedHelpFormatter
+
+
+def Options():
+    parser = OptionParser(formatter=IndentedHelpFormatter(max_help_position=70, width=200))
+    # ---------------------------------------------General options---------------------------------------------------------
+    parser.add_option('--name', dest='name', default='3601_CGLS91_DenseModelLRandThres64_test_0123', type='string', help='Name of Experiment')
+    parser.add_option('--manual-seed', dest='manual_seed', default=1993, type='int', help='Set Seed Manually')
+    parser.add_option('--gpu', action='store_false', dest='gpu', default=True, help='Use CUDA (True/False)')
+    parser.add_option('--gpu-devices', dest='gpu_devices', default=1, type='string', help='Select CUDA_VISIBLE_DEVICES (default:0)')
+    parser.add_option('--parallel', action='store_false', dest='parallel', default=True, help='Use Parallel Gpus (True/False)')
+    parser.add_option('--prenet', action='store_false', dest='prenet', default=False, help='Use Parallel Gpus (True/False)')
+    # ----------------------------------------------Model options----------------------------------------------------------
+    parser.add_option('--num-classes', dest='n_classes', default=4, type='int', help='Set Number of Classes (default:3)')
+    parser.add_option('--num-layers', dest='n_layers', default=100, type='int', help='Set Number of Layers in the 3D Unet (default:4)')
+    parser.add_option('--growth-rate', dest='gr', default=64, type='int', help='Set Growth Rate (default:32)')
+    parser.add_option('--model_type', dest='model_type', default='DenseModel', type='choice', choices=['DenseModel',], help='Select Model type')
+    parser.add_option('--downsampling', dest='down_samp', default='Convolution', type='choice', choices=['MaxPool', 'Convolution'], help='Select Downsampling Method (default:Convolution)')
+    parser.add_option('--upsampling', dest='up_samp', default='UpConvolution', type='choice', choices=['Trilinear', 'UpConvolution'], help='Select Upsampling Method (default:UpConvolution)')
+    # ---------------------------------------------Training options--------------------------------------------------------
+    parser.add_option('--epochs', dest='epochs', default=100, type='int', help='Number of Epochs (default:500)')
+    parser.add_option('--learning-rate', dest='lr', default=0.0001, type='float', help='Learning Rate (default:0.001)')
+    parser.add_option('--momentum', dest='momentum', default=0.1, type='float', help='Learning Rate (default:0.1)')
+    parser.add_option('--weight-decay', dest='weig_dec', default=0.0005, type='float', help='Weight Decay (default:0.00005)')
+    parser.add_option('--batch-size', dest='batchsize', default=8, type='int', help='Batch Size (default:8)')
+    parser.add_option('--num-workers', dest='workers', default=16, type='int', help='Workers Number (default:8)')
+    parser.add_option('--opt-method', dest='optmethod', default='adam', type='choice', choices=['rmsprop', 'sgd', 'adam'], help='Select Optimizer (default:adam)')
+    parser.add_option('--load', dest='load', default='0', type='string', help='Load Saved Model')
+    parser.add_option('--weighted', action='store_false', dest='weighted', default=True, help='Use weights in criterion (True/False)')
+    parser.add_option('--reduce', action='store_false', dest='reduce', default=True, help='Use reduce dimensions in criterion (True/False)')
+    parser.add_option('--deterministic', action='store_true', dest='deterministic', default=False, help='Select if the training is Deterministic')
+    parser.add_option('--dice', dest='dice', default='CrossEntropy', type='choice', choices=['MSE', 'Dice', 'CrossEntropy'], help='Select if the training is Deterministic')
+    # -----------------------------------------------Data options----------------------------------------------------------
+    parser.add_option('--input-filename', dest='input_filename', default='/db/user/db1/tomo_p1_astra_recon_gpu_91_norm.h5', type='string', help='Select Input Filename')
+    parser.add_option('--annotations-filename', dest='annotations_filename', default='/db/user/db1/annotations/annotations0.h5', type='string', help='Select Annotations Filename')
+    parser.add_option('--pre-filename', dest='preprocess_filename', default='/home/user/OneDrive/SemSegCT_Networks/Fold_3/3601_CGLS91_DenseModelLRandThres64_4_0123/Checkpoints/2D_slices.npz', type='string', help='Output Area in relation with the Input (default: 2,0,0,1,512,512 )')
+    parser.add_option('--input-size', dest='input_size', default='64,64,64', type='string', help='Input Size (default: 5,512,512 )')
+    parser.add_option('--input-area', dest='input_area', default='1186,0,0,2160,2560,2560', type='string', help='Input Area (default: 1186,0,0,2160,2560,2560 )')
+    parser.add_option('--output-area', dest='output_area', default='0,0,0,64,64,64', type='string', help='Output Area in relation with the Input (default: 2,0,0,1,512,512 )')
+    parser.add_option('--input-stride', dest='input_stride', default='64,64,64', type='string', help='Input stride (default:1,512,512)')
+    parser.add_option('--weights', dest='weights', default='None', type='string', help='Input stride (default:1,512,512)')
+    parser.add_option('--input-channels', dest='input_channels', default=1, type='int', help='Input stride (default:1,512,512)')
+    parser.add_option('--input-pad', dest='input_pad', default=0, type='int', help='Input Pad (default:0)')
+    parser.add_option('--input-fast', action='store_true', dest='input_fast', default=False, help='Data 3D (default:True)')
+    parser.add_option('--data-3D', action='store_false', dest='data_3D', default=True, help='Data 3D (default:True)')
+    parser.add_option('--data-CamVid', action='store_false', dest='CamVid', default=False, help='Use reduce dimensions in criterion (True/False)')
+    parser.add_option('--data-Sep', action='store_false', dest='dataSep', default=False, help='Use reduce dimensions in criterion (True/False)')
+    parser.add_option('--random-std', dest='random_std', default=12, type='int', help='Random Std (default:12)')
+    parser.add_option('--clean-run', action='store_true', dest='clean_go', default=False, help='Redo all the data preprocessing (True/False)')
+    parser.add_option('--normalize', action='store_true', dest='normalize', default=False, help='Use normalize inputs (True/False)')
+    parser.add_option('--lcn', dest='lcn', default='None', type='string', help='LCN, weight&height, depth, sigma')
+    parser.add_option('--mask-class', dest='mask_class', default=-100, type='int', help='Class that is masked during training (Default: -100)')
+    parser.add_option('--prunned-classes', dest='prunned_classes', default='4,3', type='string', help='Classes that should be replaced by other classes (Default: None)')
+    # --------------------------------------------Validation options-------------------------------------------------------
+    parser.add_option('--val-perc', dest='val_precentage', default=0.1, type='float', help='Validation Precentage (default:0.1)')
+    parser.add_option('--test-perc', dest='test_precentage', default=0.2, type='float', help='Testing Precentage (default:0.1)')
+    parser.add_option('--val-freq', dest='val_freq', default=300, type='int', help='Validation Frequency every n epochs (default:1)')
+    parser.add_option('--root', dest='root', default='/home/user/OneDrive/SemSegCT_Networks/Fold_3/', type='string', help='Root Directory')
+    parser.add_option('--cp-dest', dest='cp_dest', default='/Checkpoints/', type='string', help='Checkpoints Save Directory')
+    parser.add_option('--im-dest', dest='im_dest', default='/Images/', type='string', help='Images Save Directory')
+    parser.add_option('--tb-dest', dest='tb_dest', default='/Tensorboard/', type='string', help='Tensorboard Directory')
+    return parser
